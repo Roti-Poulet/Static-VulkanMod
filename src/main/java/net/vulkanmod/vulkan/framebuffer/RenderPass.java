@@ -59,7 +59,9 @@ public class RenderPass {
                                .storeOp(colorAttachmentInfo.storeOp)
                                .stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
                                .stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
-                               .initialLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                               // Accept UNDEFINED so the first-frame swapchain image
+                               // (which hasn't been transitioned yet) is handled correctly.
+                               .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
                                .finalLayout(colorAttachmentInfo.finalLayout);
 
                 VkAttachmentReference colorAttachmentRef = attachmentRefs.get(0)
@@ -81,7 +83,8 @@ public class RenderPass {
                                .storeOp(depthAttachmentInfo.storeOp)
                                .stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
                                .stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
-                               .initialLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                               // Same rationale as color: accept UNDEFINED on first use.
+                               .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
                                .finalLayout(depthAttachmentInfo.finalLayout);
 
                 VkAttachmentReference depthAttachmentRef = attachmentRefs.get(1)
@@ -96,17 +99,32 @@ public class RenderPass {
                           .pAttachments(attachments)
                           .pSubpasses(subpass);
 
-            //Layout transition subpass depency
+            //Layout transition subpass dependency
             switch (colorAttachmentInfo.finalLayout) {
                 case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR -> {
-                    VkSubpassDependency.Buffer subpassDependencies = VkSubpassDependency.calloc(1, stack);
+                    // Ensure color writes finish before present reads them.
+                    // Also add a depth dependency so the depth image is fully written
+                    // before the next frame re-uses it.
+                    VkSubpassDependency.Buffer subpassDependencies = VkSubpassDependency.calloc(
+                            depthAttachmentInfo != null ? 2 : 1, stack);
+
                     subpassDependencies.get(0)
-                                       .srcSubpass(VK_SUBPASS_EXTERNAL)
-                                       .dstSubpass(0)
+                                       .srcSubpass(0)
+                                       .dstSubpass(VK_SUBPASS_EXTERNAL)
                                        .srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
                                        .dstStageMask(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)
-                                       .srcAccessMask(0)
+                                       .srcAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
                                        .dstAccessMask(0);
+
+                    if (depthAttachmentInfo != null) {
+                        subpassDependencies.get(1)
+                                           .srcSubpass(0)
+                                           .dstSubpass(VK_SUBPASS_EXTERNAL)
+                                           .srcStageMask(VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT)
+                                           .dstStageMask(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)
+                                           .srcAccessMask(VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+                                           .dstAccessMask(0);
+                    }
 
                     renderPassInfo.pDependencies(subpassDependencies);
                 }
@@ -131,6 +149,20 @@ public class RenderPass {
             }
 
             id = pRenderPass.get(0);
+        }
+    }
+
+    /**
+     * Unified entry point called by {@link Framebuffer#beginRenderPass}.
+     * Dispatches to the legacy {@code vkCmdBeginRenderPass} path or the
+     * dynamic-rendering path depending on {@link Vulkan#DYNAMIC_RENDERING}.
+     */
+    public void beginRenderPass(VkCommandBuffer commandBuffer, MemoryStack stack) {
+        if (Vulkan.DYNAMIC_RENDERING) {
+            beginDynamicRendering(commandBuffer, stack);
+        } else {
+            long framebufferId = framebuffer.getFramebufferId(this);
+            beginRenderPass(commandBuffer, framebufferId, stack);
         }
     }
 
@@ -173,6 +205,9 @@ public class RenderPass {
 
     public void endRenderPass(VkCommandBuffer commandBuffer) {
         if (Vulkan.DYNAMIC_RENDERING) {
+            // vkCmdEndRenderingKHR is only called when the extension is confirmed present.
+            // On Windows 7 / drivers without VK_KHR_dynamic_rendering this branch is
+            // never taken, so the KHRDynamicRendering symbol is never resolved at runtime.
             KHRDynamicRendering.vkCmdEndRenderingKHR(commandBuffer);
 
             try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -189,11 +224,12 @@ public class RenderPass {
                                .transitionImageLayout(stack, commandBuffer, this.depthAttachmentInfo.finalLayout);
                 }
             }
-
         }
         else {
+            // Legacy render pass path — compatible with Vulkan 1.0+, no extensions needed.
             vkCmdEndRenderPass(commandBuffer);
 
+            // Update the tracked layout so subsequent passes issue correct transitions.
             if (colorAttachmentInfo != null)
                 framebuffer.getColorAttachment().setCurrentLayout(colorAttachmentInfo.finalLayout);
 
