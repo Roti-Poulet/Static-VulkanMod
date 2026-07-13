@@ -4,6 +4,8 @@
 
 A fork of VulkanMod by xCollateral without VK_KHR_dynamic_rendering. You can check out the original repo here: https://github.com/xCollateral/VulkanMod
 
+## UPDATE (July 13rd 2026): This project is now discontinued, and replaced by this one (with way less bugs): https://github.com/Roti-Poulet/VulkanExtended
+
 ***Features:***
 
 **-Allows running the latest VulkanMod on older GPUs like Kepler (GTX 6xx).** It can help performance a bit because a newer VulkanMod usually has better optimizations
